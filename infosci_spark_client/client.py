@@ -146,58 +146,77 @@ class LLMClient:
         Yields:
             Dicts with 'content' and 'reasoning' keys
         """
-        response = requests.post(
-            self.chat_endpoint,
-            json=payload,
-            headers=headers,
-            stream=True
-        )
-        response.raise_for_status()
-        
-        # Process the streaming response (Server-Sent Events format)
-        for line in response.iter_lines():
-            if not line:
-                continue
+        response = None
+        try:
+            response = requests.post(
+                self.chat_endpoint,
+                json=payload,
+                headers=headers,
+                stream=True,
+                timeout=None  # No timeout for streaming connections
+            )
+            response.raise_for_status()
             
-            line_str = line.decode('utf-8')
-            
-            # Skip SSE comments and empty lines
-            if line_str.startswith(':') or not line_str.strip():
-                continue
-            
-            # Remove "data: " prefix if present
-            if line_str.startswith('data: '):
-                line_str = line_str[6:]
-            
-            # Check for stream end marker
-            if line_str.strip() == '[DONE]':
-                break
+            # Process the streaming response (Server-Sent Events format)
+            for line in response.iter_lines():
+                if not line:
+                    continue
                 
-            try:
-                data = json.loads(line_str)
+                line_str = line.decode('utf-8')
                 
-                # Extract delta content from OpenAI-compatible streaming format
-                if "choices" in data and len(data["choices"]) > 0:
-                    choice = data["choices"][0]
-                    delta = choice.get("delta", {})
+                # Skip SSE comments and empty lines
+                if line_str.startswith(':') or not line_str.strip():
+                    continue
+                
+                # Remove "data: " prefix if present
+                if line_str.startswith('data: '):
+                    line_str = line_str[6:]
+                
+                # Check for stream end marker
+                if line_str.strip() == '[DONE]':
+                    break
                     
-                    # Get content and reasoning
-                    content = delta.get("content", "")
-                    reasoning = delta.get("reasoning_content", "") if show_thinking else ""
+                try:
+                    data = json.loads(line_str)
                     
-                    # Always yield structured data
-                    yield {
-                        "content": content,
-                        "reasoning": reasoning
-                    }
+                    # Extract delta content from OpenAI-compatible streaming format
+                    if "choices" in data and len(data["choices"]) > 0:
+                        choice = data["choices"][0]
+                        delta = choice.get("delta", {})
+                        
+                        # Get content and reasoning
+                        content = delta.get("content", "")
+                        reasoning = delta.get("reasoning_content", "") if show_thinking else ""
+                        
+                        # Always yield structured data
+                        yield {
+                            "content": content,
+                            "reasoning": reasoning
+                        }
+                        
+                        # Check if we're done
+                        if choice.get("finish_reason"):
+                            break
+                        
+                except json.JSONDecodeError:
+                    # Skip lines that aren't valid JSON
+                    continue
+                except Exception as e:
+                    # Handle other errors gracefully
+                    continue
                     
-                    # Check if we're done
-                    if choice.get("finish_reason"):
-                        break
-                    
-            except json.JSONDecodeError:
-                # Skip lines that aren't valid JSON
-                continue
-            except Exception as e:
-                # Handle other errors gracefully
-                continue
+        except (requests.exceptions.ConnectionError, 
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.Timeout,
+                OSError,
+                BrokenPipeError) as e:
+            return
+        except requests.exceptions.RequestException as e:
+            raise
+        finally:
+            # Ensure response is closed
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
